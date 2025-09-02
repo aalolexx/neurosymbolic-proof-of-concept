@@ -12,12 +12,12 @@ seed_everything(42)
 
 # --- Data ---
 dm = PPEDataModule(
-    root_dir="../data/ppe/css-data",
+    root_dir="../data/ppe-clean",
     img_size=224,
-    batch_size=64,
+    batch_size=8,
     num_workers=8,
     train_augment=True,
-    person_margin=0.05,
+    person_margin=0,
     min_person_area_frac=0.0,
 )
 
@@ -25,18 +25,19 @@ dm = PPEDataModule(
 model = SafeWithScallopLitModel(
     lr=1e-3,
     finetune_resnet=True,
-    aux_weight=0.2,
-    provenance="diffminmaxprob",
+    aux_weight=0,
+    provenance="diffminmaxprob", #"diffaddmultprob", "addmultprob",
 )
 
 # --- Checkpointing: save after EVERY epoch (plus a 'last.ckpt') ---
 ckpt_cb = ModelCheckpoint(
-    dirpath="../checkpoints_v6/safe",   # folder to save into
-    filename="safe-{epoch:02d}-train_loss={train_loss:.4f}-val_loss={val_loss:.4f}",  # file name template
-    save_top_k=-1,                # keep ALL epochs
-    every_n_epochs=1,             # save each epoch
-    save_last=True,               # also keep 'last.ckpt'
-    save_on_train_epoch_end=True  # ensure saving at train epoch end
+    dirpath="../checkpoints_v8_neuro_no_aux_loss/safe",
+    filename="safe-{epoch:02d}-train={train_loss:.4f}-val={val_loss:.4f}",
+    monitor="val_loss",
+    mode="min",
+    save_top_k=-1,
+    save_on_train_epoch_end=False,
+    save_last=True
 )
 
 # --- Trainer ---

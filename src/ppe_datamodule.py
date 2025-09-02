@@ -8,19 +8,33 @@ from torch.utils.data import Dataset
 from PIL import Image, ImageOps
 from torchvision import transforms as T
 
+# for old ppe dataset
+#CLASS_NAMES = [
+#    'Hardhat',        # 0
+#    'Mask',           # 1
+#    'NO-Hardhat',     # 2
+#    'NO-Mask',        # 3
+#    'NO-Safety Vest', # 4
+#    'Person',         # 5
+#    'Safety Cone',    # 6
+#    'Safety Vest',    # 7
+#    'machinery',      # 8
+#    'vehicle',        # 9
+#]
 CLASS_NAMES = [
-    'Hardhat',        # 0
-    'Mask',           # 1
-    'NO-Hardhat',     # 2
-    'NO-Mask',        # 3
-    'NO-Safety Vest', # 4
-    'Person',         # 5
-    'Safety Cone',    # 6
-    'Safety Vest',    # 7
-    'machinery',      # 8
-    'vehicle',        # 9
+    'helmet',        # 0
+    'gloves',        # 1
+    'vest',          # 2
+    'boots',         # 3
+    'goggles',       # 4
+    'none',          # 5
+    'person',        # 6
+    'no_helmet',     # 7
+    'no_goggle',     # 8
+    'no_gloves',     # 9
+    'no_boots',      # 10
 ]
-PERSON_CLASS_ID = 5
+PERSON_CLASS_ID = 6
 
 # -------- geometry helpers (PIL right/bottom are EXCLUSIVE) --------
 
@@ -133,6 +147,21 @@ def _square_envelope_box_fit_inside_image(
     if sx2 <= sx1: sx2 = min(W, sx1 + 1)
     if sy2 <= sy1: sy2 = min(H, sy1 + 1)
     return sx1, sy1, sx2, sy2
+
+
+def _expand_box(x1, y1, x2, y2, margin_frac, W, H):
+    """Expand the rect by margin_frac on each side and clamp inside image (PIL coords, right/bottom exclusive)."""
+    bw = x2 - x1
+    bh = y2 - y1
+    dx = bw * margin_frac
+    dy = bh * margin_frac
+    ex1 = int(math.floor(_clamp(x1 - dx, 0.0, float(W))))
+    ey1 = int(math.floor(_clamp(y1 - dy, 0.0, float(H))))
+    ex2 = int(math.ceil (_clamp(x2 + dx, 0.0, float(W))))
+    ey2 = int(math.ceil (_clamp(y2 + dy, 0.0, float(H))))
+    if ex2 <= ex1: ex2 = min(W, ex1 + 1)
+    if ey2 <= ey1: ey2 = min(H, ey1 + 1)
+    return ex1, ey1, ex2, ey2
 
 # -------- dataset --------
 
@@ -280,9 +309,12 @@ class YoloPPEPersonCropDataset(Dataset):
         px1, py1, px2, py2 = max(person_boxes, key=lambda b: (b[2]-b[0]) * (b[3]-b[1]))
 
         # square crop that envelopes the person + margin, but stays inside the image
-        sx1, sy1, sx2, sy2 = _square_envelope_box_fit_inside_image(
-            px1, py1, px2, py2, self.person_margin, W, H
-        )
+        #sx1, sy1, sx2, sy2 = _square_envelope_box_fit_inside_image(
+        #    px1, py1, px2, py2, self.person_margin, W, H
+        #)
+
+        # Warp person bbox to square image
+        rx1, ry1, rx2, ry2 = _expand_box(px1, py1, px2, py2, self.person_margin, W, H)
 
         # build 10-dim labels using ORIGINAL person bbox
         y = [0]*len(CLASS_NAMES)
@@ -295,7 +327,8 @@ class YoloPPEPersonCropDataset(Dataset):
             y[PERSON_CLASS_ID] = 1
 
         # crop + transform (square->square, no aspect distortion)
-        crop = img.crop((sx1, sy1, sx2, sy2))
+        #crop = img.crop((sx1, sy1, sx2, sy2))
+        crop = img.crop((rx1, ry1, rx2, ry2))
         crop_t = self.transform(crop)
         y_t = torch.tensor(y, dtype=torch.float32)
         return crop_t, y_t
