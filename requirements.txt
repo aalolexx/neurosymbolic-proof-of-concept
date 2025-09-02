@@ -64,7 +64,7 @@ python-dateutil==2.9.0.post0
 pytorch-lightning==2.5.4
 pyyaml==6.0.2
 pyzmq==27.0.2
-scallopy @ file:///home/ehrenhoefer/playground/scallopy-0.1.4-cp39-cp39-manylinux_2_27_x86_64.whl
+scallopy @ file:///home/alex/masters/scallopy-0.1.4-cp39-cp39-manylinux_2_27_x86_64.whl
 setuptools==80.9.0
 six==1.17.0
 stack-data==0.6.3

@@ -1,5 +1,5 @@
 # train_and_checkpoint.py
-from lightning import Trainer, seed_everything
+from pytorch_lightning import Trainer, seed_everything
 try:
     from lightning.pytorch.callbacks import ModelCheckpoint
 except Exception:
@@ -24,15 +24,15 @@ dm = PPEDataModule(
 # --- Model ---
 model = SafeWithScallopLitModel(
     lr=1e-3,
-    backbone_trainable=True,
+    finetune_resnet=True,
     aux_weight=0.2,
-    provenance="diffprob",
+    provenance="diffminmaxprob",
 )
 
 # --- Checkpointing: save after EVERY epoch (plus a 'last.ckpt') ---
 ckpt_cb = ModelCheckpoint(
-    dirpath="../checkpoints/safe",   # folder to save into
-    filename="safe-{epoch:02d}",  # file name template
+    dirpath="../checkpoints_v6/safe",   # folder to save into
+    filename="safe-{epoch:02d}-train_loss={train_loss:.4f}-val_loss={val_loss:.4f}",  # file name template
     save_top_k=-1,                # keep ALL epochs
     every_n_epochs=1,             # save each epoch
     save_last=True,               # also keep 'last.ckpt'

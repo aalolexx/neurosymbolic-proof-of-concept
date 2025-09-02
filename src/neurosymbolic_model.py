@@ -32,53 +32,43 @@ class ScallopAnd:
         self.ctx = scl.ScallopContext(provenance=provenance)
 
         # Declare predicates
-        self.ctx.add_relation("helmet", [("unit", "unit")])
-        self.ctx.add_relation("vest", [("unit", "unit")])
-        self.ctx.add_relation("person_is_safe", [("unit", "unit")])
+        self.ctx.add_relation("helmet", ())
+        self.ctx.add_relation("vest", ())
+        self.ctx.add_relation("person_is_safe", ())
 
         # person_is_safe() :- helmet(), vest().
-        self.ctx.add_rule("person_is_safe(unit()) :- helmet(unit()), vest(unit()).")
+        self.ctx.add_rule("person_is_safe() = helmet() and vest()")
+
+    @staticmethod
+    def _extract_prob(res) -> float:
+        """
+        Handle different return shapes across scallopy versions.
+        Usually you'll get something like [(prob, ())] for nullary queries under diff provenance.
+        """
+        if not res:
+            return 0.0
+        for item in res:
+            if isinstance(item, (tuple, list)):
+                if item and isinstance(item[0], (float, int)):
+                    return float(item[0])
+                if item and isinstance(item[-1], (float, int)):
+                    return float(item[-1])
+            elif isinstance(item, (float, int)):
+                return float(item)
+        return None
 
     def __call__(self, p_helmet: torch.Tensor, p_vest: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            p_helmet: (B,) probabilities in [0,1]
-            p_vest:   (B,) probabilities in [0,1]
-        Returns:
-            p_safe:   (B,) probabilities in [0,1]
-        """
-
-        # With scallopy, we’ll push one mini “database” per batch element.
-        # This is a simple (and not the most efficient) reference implementation.
-        p_safe = []
+        outs = []
+        # Evaluate each example in its own cloned context (avoids fact accumulation)
         for ph, pv in zip(p_helmet.detach().cpu().tolist(), p_vest.detach().cpu().tolist()):
-            # New runtime for each item
-            rt = self.ctx.run()  # snapshot the compiled program
-            # Add weighted facts (fuzzy facts). We encode with (probability, tuple)
-            # Some scallopy builds use rt.add_fact("pred", prob, args...) or rt.add_facts list.
-            try:
-                rt.add_fact("helmet", ph, ())
-                rt.add_fact("vest", pv, ())
-            except Exception:
-                # API variant
-                # TODO Check if this can be removed
-                rt.add_fact("helmet", (ph, ()))
-                rt.add_fact("vest", (pv, ()))
-
-            out = rt.run("person_is_safe")  # returns list of (prob, args)
-            if len(out) == 0:
-                p_safe.append(0.0)
-            else:
-                # Aggregate (usually there’s one result)
-                prob = 0.0
-                for item in out:
-                    # item may be (p, args) or (args, p) depending on version
-                    if isinstance(item[0], (float, int)):
-                        prob = max(prob, float(item[0]))
-                    else:
-                        prob = max(prob, float(item[-1]))
-                p_safe.append(prob)
-        return torch.tensor(p_safe, device=p_helmet.device, dtype=p_helmet.dtype)
+            rt = self.ctx.clone()
+            # Add 0-arity weighted facts: empty-tuple arguments
+            rt.add_facts("helmet", [(float(ph), ())])
+            rt.add_facts("vest",   [(float(pv), ())])
+            rt.run()  # executes program in-place; returns None
+            res = list(rt.relation("person_is_safe"))  # <-- query here, not in run()
+            outs.append(self._extract_prob(res))
+        return torch.tensor(outs, device=p_helmet.device, dtype=p_helmet.dtype)
 
 
 # ---- Lightning model ----
@@ -89,29 +79,35 @@ class SafeWithScallopLitModel(LightningModule):
     """
     def __init__(
         self,
-        backbone_trainable: bool = True,
+        finetune_resnet: bool = True,
         provenance: str = "diffprob",
         aux_weight: float = 0.2,
+        lr: float = 1e-3,
     ):
         super().__init__()
         self.save_hyperparameters()
 
         # Backbone
         resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        if not backbone_trainable:
-            for p in resnet.parameters():
+        self.feature_extractor = nn.Sequential(*(list(resnet.children())[:-1]))  # -> [B,512,1,1]        
+
+        # Apply your desired semantics:
+        if finetune_resnet:
+            # Fine-tune only the last ~30% of the backbone
+            _unfreeze_backbone_tail(self.feature_extractor, tail_fraction=0.30)
+        else:
+            # Freeze the whole backbone
+            for p in self.feature_extractor.parameters():
                 p.requires_grad = False
 
-        # Remove classifier head; keep convs + global avgpool
-        # ResNet18: last conv output 512 channels + AdaptiveAvgPool2d
-        self.feature_extractor = nn.Sequential(
-            *(list(resnet.children())[:-1])  # outputs [B, 512, 1, 1]
-        )
         self.embed_dim = 512
 
         # Projection heads -> neural predicates
-        self.helmet_head = nn.Linear(self.embed_dim, 1)
-        self.vest_head   = nn.Linear(self.embed_dim, 1)
+        self.helmet_out = make_predicate_head(self.embed_dim)
+        self.vest_out = make_predicate_head(self.embed_dim)
+
+        self.helmet_out.requires_grad_(True)
+        self.vest_out.requires_grad_(True)
 
         # Scallop rule (or differentiable fallback)
         self.scallop_program = ScallopAnd(provenance=provenance)
@@ -128,8 +124,8 @@ class SafeWithScallopLitModel(LightningModule):
 
     def _predicate_probs(self, feats: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         # Sigmoid to get probabilities
-        p_helmet = torch.sigmoid(self.helmet_head(feats)).squeeze(-1)  # [B]
-        p_vest   = torch.sigmoid(self.vest_head(feats)).squeeze(-1)    # [B]
+        p_helmet = torch.sigmoid(self.helmet_out(feats)).squeeze(-1)  # [B]
+        p_vest   = torch.sigmoid(self.vest_out(feats)).squeeze(-1)    # [B]
         return p_helmet, p_vest
 
     def _scallop_prob(self, p_helmet: torch.Tensor, p_vest: torch.Tensor) -> torch.Tensor:
@@ -184,6 +180,11 @@ class SafeWithScallopLitModel(LightningModule):
             f"{stage}/acc_safe": acc,
         }, on_step=on_step, on_epoch=on_epoch, prog_bar=True, logger=True)
 
+        if stage == "train":
+            self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+        if stage == "val":
+            self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=False, logger=True)
+
         return loss
 
     # -- Lightning hooks (DRY) --
@@ -204,3 +205,65 @@ class SafeWithScallopLitModel(LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
+
+
+# ------------------------
+# utils
+
+def make_predicate_head(in_dim: int) -> nn.Sequential:
+    """
+    Two-hidden-layer MLP: in_dim -> 256 -> 128 -> 1 (logit).
+    Uses ReLU and Kaiming init. Returns nn.Sequential.
+    """
+    mlp = nn.Sequential(
+        nn.Linear(in_dim, 256),
+        nn.ReLU(inplace=True),
+        nn.Linear(256, 128),
+        nn.ReLU(inplace=True),
+        nn.Linear(128, 1),
+    )
+    # Kaiming init for ReLU MLP
+    for m in mlp:
+        if isinstance(m, nn.Linear):
+            nn.init.kaiming_normal_(m.weight, nonlinearity="relu")
+            nn.init.zeros_(m.bias)
+    return mlp
+
+
+def _unfreeze_backbone_tail(module: nn.Module, tail_fraction: float = 0.30):
+    """
+    Freeze entire backbone, then unfreeze the last `tail_fraction` of parameters.
+    Works generically by parameter order (deepest layers appear last in ResNet18).
+    """
+    # freeze all
+    for p in module.parameters():
+        p.requires_grad = False
+
+    # unfreeze the tail
+    params = [p for p in module.parameters()]
+    if not params:
+        return
+    k = max(1, int(round(len(params) * tail_fraction)))
+    for p in params[-k:]:
+        p.requires_grad = True
+
+
+
+
+# -------------------------
+# smoke test
+if __name__ == "__main__":
+    
+    print("testing scallopy logic")
+    import scallopy as scl
+    ctx = scl.ScallopContext(provenance="diffminmaxprob") 
+    # note
+    # diffaddmultprob would return 0.21
+    # diffminmaxprob would return 0.41
+    ctx.add_rule("safe() = helmet(), vest()")
+    ctx.add_facts("helmet", [(0.73, ())])
+    ctx.add_facts("vest",   [(0.41, ())])
+    ctx.run()
+    print(list(ctx.relation("helmet")))   # expect [(0.73, ())]
+    print(list(ctx.relation("vest")))     # expect [(0.41, ())]
+    print(list(ctx.relation("safe")))  
